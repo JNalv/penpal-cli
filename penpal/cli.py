@@ -20,6 +20,7 @@ from penpal.config import MODEL_ALIASES, load_config
 from penpal.cost import estimate_cost, format_cost
 from penpal import db
 from penpal.db import init_db
+import penpal.skills as skills_mod
 
 console = Console()
 err_console = Console(stderr=True)
@@ -134,6 +135,8 @@ def logout_cmd():
 @click.argument("prompt", required=False)
 @click.option("--model", "-m", default=None, help="Model name or alias (haiku, sonnet, opus).")
 @click.option("--system", "-s", type=click.Path(exists=True), default=None, help="Path to system prompt file.")
+@click.option("--skill", default=None, help="Skill name to use as system prompt.")
+@click.option("--file", "-f", "files", type=click.Path(exists=True), multiple=True, help="File(s) to attach (images, PDFs, text).")
 @click.option("--max-tokens", default=None, type=int, help="Max output tokens.")
 @click.option("--tag", "-t", default=None, help="Human-readable tag for this request.")
 @click.option("--stdin", "read_stdin", is_flag=True, help="Read prompt from stdin.")
@@ -141,11 +144,14 @@ def ask_cmd(
     prompt: Optional[str],
     model: Optional[str],
     system: Optional[str],
+    skill: Optional[str],
+    files: tuple,
     max_tokens: Optional[int],
     tag: Optional[str],
     read_stdin: bool,
 ):
     """Submit a prompt to the Batch API."""
+    from pathlib import Path as _Path
     cfg = load_config()
     db_path = cfg.db_path
     init_db(db_path)
@@ -159,13 +165,32 @@ def ask_cmd(
     # Resolve model
     resolved_model = resolve_model(model or cfg.model)
 
+    # --skill and --system are mutually exclusive
+    if skill and system:
+        raise click.UsageError("--skill and --system are mutually exclusive.")
+
     # Resolve system prompt
     system_text: Optional[str] = None
-    if system:
+    skill_name: Optional[str] = None
+    if skill:
+        system_text = skills_mod.get_skill(cfg.skills_dir, skill)
+        if system_text is None:
+            available = [name for name, _ in skills_mod.list_skills(cfg.skills_dir)]
+            err_console.print(f"[red]✗[/red] Skill '{skill}' not found.")
+            if available:
+                err_console.print(f"  Available: {', '.join(available)}")
+            else:
+                err_console.print("  No skills found. Use `penpal skills add <name>` to create one.")
+            sys.exit(1)
+        skill_name = skill
+    elif system:
         system_text = open(system).read()
 
     # Resolve max_tokens
     mt = max_tokens or cfg.max_tokens
+
+    # Resolve files
+    file_paths = [_Path(f) for f in files]
 
     # Get API key
     try:
@@ -175,12 +200,17 @@ def ask_cmd(
         sys.exit(1)
 
     # Build and submit
-    request_obj = build_single_request(
-        prompt=prompt,
-        model=resolved_model,
-        max_tokens=mt,
-        system_prompt=system_text,
-    )
+    try:
+        request_obj = build_single_request(
+            prompt=prompt,
+            model=resolved_model,
+            max_tokens=mt,
+            system_prompt=system_text,
+            files=file_paths if file_paths else None,
+        )
+    except ValueError as e:
+        err_console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
 
     try:
         batch_id = submit_batch(api_key, [request_obj])
@@ -195,6 +225,7 @@ def ask_cmd(
         sys.exit(1)
 
     # Store in DB
+    file_name = ", ".join(p.name for p in file_paths) if file_paths else None
     db.save_request(
         db_path=db_path,
         batch_id=batch_id,
@@ -203,12 +234,18 @@ def ask_cmd(
         max_tokens=mt,
         custom_id=request_obj["custom_id"],
         system_prompt=system_text,
+        skill_name=skill_name,
+        file_name=file_name,
         tag=tag,
     )
 
     console.print(f"[green]✓[/green] Submitted 1 request (batch: {batch_id})")
     if tag:
         console.print(f"  Tag: {tag}")
+    if file_paths:
+        console.print(f"  Files: {', '.join(p.name for p in file_paths)}")
+    if skill_name:
+        console.print(f"  Skill: {skill_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -284,13 +321,12 @@ def status_cmd(show_all: bool, limit: int, watch: bool, output_json: bool):
         table.add_column("Cost", justify="right")
 
         for r in requests:
-            short_id = r.batch_id[:12] if len(r.batch_id) > 12 else r.batch_id
             model_short = r.model.split("-")[1] if "-" in r.model else r.model
             status_display = f"{_status_icon(r.status)} {r.status}"
             age = _ago(r.created_at)
             tag = r.tag or "—"
             cost = format_cost(r.estimated_cost or 0.0)
-            table.add_row(short_id, model_short, status_display, age, tag, cost)
+            table.add_row(r.batch_id, model_short, status_display, age, tag, cost)
 
         console.print(table)
 
@@ -490,3 +526,88 @@ def config_cmd(path: bool, edit: bool):
     console.print(f"\n[bold]Model Aliases[/bold]")
     for alias, full in MODEL_ALIASES.items():
         console.print(f"  {alias:8} → {full}")
+
+
+# ---------------------------------------------------------------------------
+# penpal skills
+# ---------------------------------------------------------------------------
+
+@main.group("skills", invoke_without_command=True)
+@click.pass_context
+def skills_cmd(ctx):
+    """Manage reusable system prompt skills."""
+    if ctx.invoked_subcommand is None:
+        cfg = load_config()
+        skill_list = skills_mod.list_skills(cfg.skills_dir)
+        if not skill_list:
+            console.print("No skills found. Use [cyan]penpal skills add <name>[/cyan] to create one.")
+            return
+        console.print("Available skills:")
+        for name, desc in skill_list:
+            console.print(f"  [cyan]{name:<22}[/cyan] {desc}")
+
+
+@skills_cmd.command("show")
+@click.argument("name")
+def skills_show(name: str):
+    """Print the contents of a skill."""
+    cfg = load_config()
+    content = skills_mod.get_skill(cfg.skills_dir, name)
+    if content is None:
+        err_console.print(f"[red]✗[/red] Skill '{name}' not found.")
+        sys.exit(1)
+    click.echo(content)
+
+
+@skills_cmd.command("add")
+@click.argument("name")
+def skills_add(name: str):
+    """Create a new skill (opens $EDITOR)."""
+    import os, subprocess, tempfile
+    cfg = load_config()
+    if skills_mod.skill_exists(cfg.skills_dir, name):
+        err_console.print(f"[red]✗[/red] Skill '{name}' already exists. Use [cyan]penpal skills edit {name}[/cyan].")
+        sys.exit(1)
+    path = skills_mod.skill_path(cfg.skills_dir, name)
+    template = f"# {name}\nYou are a helpful assistant.\n"
+    path.write_text(template, encoding="utf-8")
+    editor = os.environ.get("EDITOR", "nano")
+    subprocess.call([editor, str(path)])
+    console.print(f"[green]✓[/green] Skill '{name}' saved.")
+
+
+@skills_cmd.command("edit")
+@click.argument("name")
+def skills_edit(name: str):
+    """Edit an existing skill."""
+    import os, subprocess
+    cfg = load_config()
+    if not skills_mod.skill_exists(cfg.skills_dir, name):
+        err_console.print(f"[red]✗[/red] Skill '{name}' not found.")
+        sys.exit(1)
+    path = skills_mod.skill_path(cfg.skills_dir, name)
+    editor = os.environ.get("EDITOR", "nano")
+    subprocess.call([editor, str(path)])
+    console.print(f"[green]✓[/green] Skill '{name}' updated.")
+
+
+@skills_cmd.command("rm")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def skills_rm(name: str, yes: bool):
+    """Delete a skill."""
+    cfg = load_config()
+    if not skills_mod.skill_exists(cfg.skills_dir, name):
+        err_console.print(f"[red]✗[/red] Skill '{name}' not found.")
+        sys.exit(1)
+    if not yes:
+        click.confirm(f"Delete skill '{name}'?", abort=True)
+    skills_mod.delete_skill(cfg.skills_dir, name)
+    console.print(f"[green]✓[/green] Skill '{name}' deleted.")
+
+
+@skills_cmd.command("path")
+def skills_path():
+    """Print the skills directory path."""
+    cfg = load_config()
+    click.echo(str(cfg.skills_dir))
