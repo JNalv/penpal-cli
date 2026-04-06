@@ -1,0 +1,123 @@
+/* Penpal TUI — minimal dark theme */
+
+Screen {
+    background: $surface;
+}
+
+#header {
+    dock: top;
+    height: 1;
+    background: $primary;
+    color: $text;
+    content-align: left middle;
+    padding: 0 1;
+}
+
+#cost-display {
+    dock: right;
+    width: auto;
+    padding: 0 1;
+    content-align: right middle;
+}
+
+#table-container {
+    height: 1fr;
+    border-bottom: solid $primary-darken-2;
+}
+
+RequestTable {
+    height: 1fr;
+}
+
+DataTable {
+    height: 1fr;
+}
+
+DataTable > .datatable--header {
+    background: $primary-darken-1;
+    color: $text;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: $accent;
+    color: $text;
+    text-style: reverse;
+}
+
+/* Status colours applied via markup in cells */
+
+DetailPane {
+    height: 8;
+    background: $surface-darken-1;
+    border-top: solid $primary-darken-2;
+    padding: 0 1;
+}
+
+#detail-header {
+    color: $text-muted;
+    text-style: bold;
+    height: 1;
+}
+
+#detail-content {
+    height: 5;
+    overflow: hidden auto;
+}
+
+#detail-footer {
+    color: $text-muted;
+    height: 1;
+    content-align: right middle;
+}
+
+/* Overlay screens */
+ConfirmScreen {
+    align: center middle;
+}
+
+#confirm-dialog {
+    width: 50;
+    height: auto;
+    border: solid $warning;
+    background: $surface;
+    padding: 1 2;
+}
+
+NewRequestScreen {
+    align: center middle;
+}
+
+#new-request-dialog {
+    width: 70;
+    height: auto;
+    border: solid $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+SearchScreen {
+    align: center middle;
+}
+
+#search-dialog {
+    width: 60;
+    height: auto;
+    border: solid $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+Label {
+    width: 100%;
+}
+
+Input {
+    width: 100%;
+    margin-top: 1;
+}
+
+Button {
+    margin-top: 1;
+    margin-right: 1;
+}

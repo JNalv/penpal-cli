@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS requests (
     request_count   INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at    TEXT,
+    expires_at      TEXT,
     input_tokens    INTEGER,
     output_tokens   INTEGER,
     estimated_cost  REAL
@@ -68,6 +69,10 @@ def get_conn(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
 def init_db(db_path: Path) -> None:
     with get_conn(db_path) as conn:
         conn.executescript(SCHEMA)
+        # Migration: add expires_at if not present (existing databases)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(requests)").fetchall()}
+        if "expires_at" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN expires_at TEXT")
 
 
 def _row_to_request(row: sqlite3.Row) -> Request:
@@ -88,6 +93,7 @@ def _row_to_request(row: sqlite3.Row) -> Request:
         request_count=row["request_count"],
         created_at=row["created_at"],
         completed_at=row["completed_at"],
+        expires_at=row["expires_at"],
         input_tokens=row["input_tokens"],
         output_tokens=row["output_tokens"],
         estimated_cost=row["estimated_cost"],
@@ -121,15 +127,16 @@ def save_request(
     tag: Optional[str] = None,
     is_multi: bool = False,
     request_count: int = 1,
+    expires_at: Optional[str] = None,
 ) -> int:
     with get_conn(db_path) as conn:
         cur = conn.execute(
             """INSERT INTO requests
                (batch_id, custom_id, model, system_prompt, skill_name,
-                user_prompt, file_name, tag, max_tokens, is_multi, request_count)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                user_prompt, file_name, tag, max_tokens, is_multi, request_count, expires_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (batch_id, custom_id, model, system_prompt, skill_name,
-             user_prompt, file_name, tag, max_tokens, int(is_multi), request_count),
+             user_prompt, file_name, tag, max_tokens, int(is_multi), request_count, expires_at),
         )
         return cur.lastrowid
 
@@ -229,6 +236,14 @@ def get_responses(db_path: Path, request_id: int) -> list[Response]:
             (request_id,),
         ).fetchall()
         return [_row_to_response(r) for r in rows]
+
+
+def update_expires_at(db_path: Path, batch_id: str, expires_at: str) -> None:
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE requests SET expires_at=? WHERE batch_id=?",
+            (expires_at, batch_id),
+        )
 
 
 def mark_as_read(db_path: Path, batch_id: str) -> None:

@@ -58,15 +58,16 @@ def _with_retry(fn, max_attempts: int = 3):
                 raise
 
 
-def submit_batch(api_key: str, requests: list[dict]) -> str:
-    """Submit a batch and return the batch_id."""
+def submit_batch(api_key: str, requests: list[dict]) -> dict:
+    """Submit a batch. Returns dict with 'batch_id' and 'expires_at' (ISO string)."""
     client = _make_client(api_key)
 
     # Validate key and billing errors immediately — don't retry these.
     def _submit():
         try:
             batch = client.messages.batches.create(requests=requests)
-            return batch.id
+            expires = batch.expires_at.isoformat() if batch.expires_at else None
+            return {"batch_id": batch.id, "expires_at": expires}
         except anthropic.AuthenticationError as e:
             raise AuthAPIError(
                 f"Invalid API key (401). Run `penpal auth` to reconfigure.\n{e.message}"
@@ -89,8 +90,10 @@ def check_batch(api_key: str, batch_id: str) -> dict:
     def _check():
         try:
             batch = client.messages.batches.retrieve(batch_id)
+            expires = batch.expires_at.isoformat() if batch.expires_at else None
             return {
                 "status": batch.processing_status,  # "in_progress" | "ended"
+                "expires_at": expires,
                 "counts": {
                     "processing": batch.request_counts.processing,
                     "succeeded": batch.request_counts.succeeded,

@@ -23,6 +23,7 @@ class Request:
     request_count: int
     created_at: str
     completed_at: Optional[str]
+    expires_at: Optional[str]
     input_tokens: Optional[int]
     output_tokens: Optional[int]
     estimated_cost: Optional[float]

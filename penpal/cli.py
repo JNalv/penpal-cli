@@ -213,7 +213,9 @@ def ask_cmd(
         sys.exit(1)
 
     try:
-        batch_id = submit_batch(api_key, [request_obj])
+        result = submit_batch(api_key, [request_obj])
+        batch_id = result["batch_id"]
+        expires_at = result["expires_at"]
     except AuthAPIError as e:
         err_console.print(f"[red]✗[/red] {e}")
         sys.exit(1)
@@ -237,6 +239,7 @@ def ask_cmd(
         skill_name=skill_name,
         file_name=file_name,
         tag=tag,
+        expires_at=expires_at,
     )
 
     console.print(f"[green]✓[/green] Submitted 1 request (batch: {batch_id})")
@@ -277,6 +280,8 @@ def status_cmd(show_all: bool, limit: int, watch: bool, output_json: bool):
             for req in pending:
                 try:
                     result = check_batch(api_key, req.batch_id)
+                    if result.get("expires_at") and not req.expires_at:
+                        db.update_expires_at(db_path, req.batch_id, result["expires_at"])
                     if result["status"] == "ended":
                         # Determine final status
                         counts = result["counts"]
@@ -611,3 +616,15 @@ def skills_path():
     """Print the skills directory path."""
     cfg = load_config()
     click.echo(str(cfg.skills_dir))
+
+
+# ---------------------------------------------------------------------------
+# penpal session
+# ---------------------------------------------------------------------------
+
+@main.command("session")
+def session_cmd():
+    """Launch the TUI dashboard."""
+    from penpal.tui.app import PenpalApp
+    app = PenpalApp()
+    app.run()
