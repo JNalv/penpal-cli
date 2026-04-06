@@ -5,7 +5,7 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -312,10 +312,6 @@ class PenpalApp(App):
             except (APIError, AuthAPIError):
                 continue
 
-            # Always update expires_at if we got a fresher value
-            if result.get("expires_at") and not req.expires_at:
-                db.update_expires_at(self._cfg.db_path, req.batch_id, result["expires_at"])
-
             if result["status"] == "ended":
                 counts = result["counts"]
                 if counts["errored"] > 0 and counts["succeeded"] == 0:
@@ -325,12 +321,18 @@ class PenpalApp(App):
                 else:
                     final_status = "completed"
 
+                now_iso = datetime.now(tz=timezone.utc).isoformat()
                 db.update_request_status(
                     self._cfg.db_path,
                     req.batch_id,
                     final_status,
-                    completed_at=datetime.now(tz=timezone.utc).isoformat(),
+                    completed_at=now_iso,
                 )
+                if final_status == "completed":
+                    result_expiry = (
+                        datetime.now(tz=timezone.utc) + timedelta(days=29)
+                    ).isoformat()
+                    db.update_expires_at(self._cfg.db_path, req.batch_id, result_expiry)
                 updated = db.get_request_by_batch_id(self._cfg.db_path, req.batch_id)
                 if updated:
                     self._requests[req.batch_id] = updated

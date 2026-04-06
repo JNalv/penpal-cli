@@ -99,6 +99,29 @@ def build_file_content_block(file_path: Path) -> tuple[str | None, dict]:
         )
 
 
+def build_batch_requests(
+    template_prompt: str,
+    files: list[Path],
+    model: str,
+    max_tokens: int,
+    system_prompt: Optional[str] = None,
+) -> list[dict]:
+    """Build one batch request per file, applying template_prompt to each."""
+    requests = []
+    for fp in files:
+        requests.append(
+            build_single_request(
+                prompt=template_prompt,
+                model=model,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+                custom_id=fp.name,
+                files=[fp],
+            )
+        )
+    return requests
+
+
 def build_single_request(
     prompt: str,
     model: str,

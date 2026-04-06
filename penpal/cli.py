@@ -14,7 +14,8 @@ from rich import box
 
 from penpal import __version__
 from penpal.auth import AuthError, delete_api_key, get_api_key, get_key_status, store_api_key
-from penpal.builder import build_single_request, resolve_model
+from penpal.builder import build_batch_requests, build_single_request, resolve_model
+from penpal.extractor import extract_code_blocks
 from penpal.client import APIError, AuthAPIError, BillingError, check_batch, get_results, submit_batch, validate_api_key
 from penpal.config import MODEL_ALIASES, load_config
 from penpal.cost import estimate_cost, format_cost
@@ -48,6 +49,33 @@ def _ago(dt_str: str) -> str:
         return f"{seconds // 86400}d ago"
     except Exception:
         return dt_str
+
+
+_RESULT_RETENTION_DAYS = 29  # Anthropic retains completed batch results for 29 days
+
+
+def _result_expiry(completed_at: str) -> str:
+    """Return ISO string 29 days after completed_at — when the result payload is deleted."""
+    dt = datetime.fromisoformat(completed_at).replace(tzinfo=timezone.utc)
+    return (dt + timedelta(days=_RESULT_RETENTION_DAYS)).isoformat()
+
+
+def _expires_countdown(expires_at: Optional[str], status: str) -> str:
+    """Countdown to result payload deletion. Only meaningful for completed batches."""
+    if status != "completed" or not expires_at:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(expires_at).replace(tzinfo=timezone.utc)
+        total = int((dt - datetime.now(tz=timezone.utc)).total_seconds())
+        if total <= 0:
+            return "deleted"
+        if total < 86400:
+            return f"{total // 3600}h {(total % 3600) // 60}m"
+        days = total // 86400
+        hours = (total % 86400) // 3600
+        return f"{days}d {hours}h"
+    except Exception:
+        return "—"
 
 
 def _status_icon(status: str) -> str:
@@ -140,6 +168,8 @@ def logout_cmd():
 @click.option("--max-tokens", default=None, type=int, help="Max output tokens.")
 @click.option("--tag", "-t", default=None, help="Human-readable tag for this request.")
 @click.option("--stdin", "read_stdin", is_flag=True, help="Read prompt from stdin.")
+@click.option("--batch", "-b", "batch_dir", type=click.Path(exists=True), default=None,
+              help="Directory of files to process as a batch (one request per file).")
 def ask_cmd(
     prompt: Optional[str],
     model: Optional[str],
@@ -149,6 +179,7 @@ def ask_cmd(
     max_tokens: Optional[int],
     tag: Optional[str],
     read_stdin: bool,
+    batch_dir: Optional[str],
 ):
     """Submit a prompt to the Batch API."""
     from pathlib import Path as _Path
@@ -199,7 +230,69 @@ def ask_cmd(
         err_console.print(f"[red]✗[/red] {e}")
         sys.exit(1)
 
-    # Build and submit
+    # --batch mode: one request per file in directory
+    if batch_dir:
+        from penpal.builder import IMAGE_EXTENSIONS, PDF_EXTENSIONS, TEXT_EXTENSIONS
+        supported_exts = IMAGE_EXTENSIONS | PDF_EXTENSIONS | TEXT_EXTENSIONS
+        batch_path = _Path(batch_dir)
+        batch_files = sorted(
+            p for p in batch_path.iterdir()
+            if p.is_file() and p.suffix.lower() in supported_exts
+        )
+        if not batch_files:
+            err_console.print(f"[red]✗[/red] No supported files found in '{batch_dir}'.")
+            sys.exit(1)
+
+        try:
+            request_objs = build_batch_requests(
+                template_prompt=prompt,
+                files=batch_files,
+                model=resolved_model,
+                max_tokens=mt,
+                system_prompt=system_text,
+            )
+        except ValueError as e:
+            err_console.print(f"[red]✗[/red] {e}")
+            sys.exit(1)
+
+        try:
+            result = submit_batch(api_key, request_objs)
+            batch_id = result["batch_id"]
+            expires_at = result["expires_at"]
+        except AuthAPIError as e:
+            err_console.print(f"[red]✗[/red] {e}")
+            sys.exit(1)
+        except BillingError as e:
+            err_console.print(f"[red]✗[/red] {e}")
+            sys.exit(1)
+        except APIError as e:
+            err_console.print(f"[red]✗[/red] {e}")
+            sys.exit(1)
+
+        db.save_request(
+            db_path=db_path,
+            batch_id=batch_id,
+            model=resolved_model,
+            user_prompt=prompt,
+            max_tokens=mt,
+            custom_id=request_objs[0]["custom_id"],
+            system_prompt=system_text,
+            skill_name=skill_name,
+            file_name=", ".join(p.name for p in batch_files),
+            tag=tag,
+            expires_at=expires_at,
+            is_multi=True,
+            request_count=len(batch_files),
+        )
+
+        console.print(f"[green]✓[/green] Submitted {len(batch_files)} requests (batch: {batch_id})")
+        if tag:
+            console.print(f"  Tag: {tag}")
+        if skill_name:
+            console.print(f"  Skill: {skill_name}")
+        return
+
+    # Single request
     try:
         request_obj = build_single_request(
             prompt=prompt,
@@ -291,10 +384,13 @@ def status_cmd(show_all: bool, limit: int, watch: bool, output_json: bool):
                             final_status = "expired"
                         else:
                             final_status = "completed"
+                        now_iso = datetime.now(tz=timezone.utc).isoformat()
                         db.update_request_status(
                             db_path, req.batch_id, final_status,
-                            completed_at=datetime.now(tz=timezone.utc).isoformat()
+                            completed_at=now_iso,
                         )
+                        if final_status == "completed":
+                            db.update_expires_at(db_path, req.batch_id, _result_expiry(now_iso))
                 except AuthAPIError as e:
                     err_console.print(f"[red]✗[/red] Auth error: {e}")
                     break
@@ -323,6 +419,7 @@ def status_cmd(show_all: bool, limit: int, watch: bool, output_json: bool):
         table.add_column("Status")
         table.add_column("Age")
         table.add_column("Tag")
+        table.add_column("DL expires", justify="right")
         table.add_column("Cost", justify="right")
 
         for r in requests:
@@ -330,8 +427,9 @@ def status_cmd(show_all: bool, limit: int, watch: bool, output_json: bool):
             status_display = f"{_status_icon(r.status)} {r.status}"
             age = _ago(r.created_at)
             tag = r.tag or "—"
+            dl_expires = _expires_countdown(r.expires_at, r.status)
             cost = format_cost(r.estimated_cost or 0.0)
-            table.add_row(r.batch_id, model_short, status_display, age, tag, cost)
+            table.add_row(r.batch_id, model_short, status_display, age, tag, dl_expires, cost)
 
         console.print(table)
 
@@ -358,12 +456,14 @@ def status_cmd(show_all: bool, limit: int, watch: bool, output_json: bool):
 @click.option("--full", is_flag=True, help="Print complete response without truncation.")
 @click.option("--raw", is_flag=True, help="Print raw text with no Rich formatting.")
 @click.option("--index", "-i", default=None, type=int, help="For multi-request batches: read the Nth result.")
+@click.option("--extract", is_flag=True, help="Extract code blocks from response to disk.")
 def read_cmd(
     batch_id_or_tag: Optional[str],
     latest: bool,
     full: bool,
     raw: bool,
     index: Optional[int],
+    extract: bool,
 ):
     """Retrieve and display a completed response."""
     cfg = load_config()
@@ -395,10 +495,13 @@ def read_cmd(
             if result["status"] == "ended":
                 counts = result["counts"]
                 final_status = "failed" if (counts["errored"] > 0 and counts["succeeded"] == 0) else "completed"
+                now_iso = datetime.now(tz=timezone.utc).isoformat()
                 db.update_request_status(
                     db_path, req.batch_id, final_status,
-                    completed_at=datetime.now(tz=timezone.utc).isoformat()
+                    completed_at=now_iso,
                 )
+                if final_status == "completed":
+                    db.update_expires_at(db_path, req.batch_id, _result_expiry(now_iso))
                 # Reload
                 req = db.get_request_by_batch_id(db_path, req.batch_id)
         except AuthError:
@@ -484,6 +587,17 @@ def read_cmd(
     db.mark_as_read(db_path, req.batch_id)
 
     content = resp.content
+
+    # Extraction
+    if extract:
+        from pathlib import Path as _Path2
+        out_dir = cfg.extraction_output_dir if hasattr(cfg, "extraction_output_dir") else _Path2(".")
+        min_lines = cfg.extraction_min_lines if hasattr(cfg, "extraction_min_lines") else 20
+        content, written = extract_code_blocks(content, out_dir, min_lines)
+        if written:
+            for p in written:
+                err_console.print(f"[green]✓[/green] Extracted: {p}")
+
     if raw:
         click.echo(content)
         return
@@ -616,6 +730,67 @@ def skills_path():
     """Print the skills directory path."""
     cfg = load_config()
     click.echo(str(cfg.skills_dir))
+
+
+# ---------------------------------------------------------------------------
+# penpal session
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# penpal history
+# ---------------------------------------------------------------------------
+
+@main.command("history")
+@click.option("--search", default="", help="Filter by prompt or tag text.")
+@click.option("--model", "model_filter", default=None, help="Filter by model name.")
+@click.option("--since", default=None, help="Show requests since: today, yesterday, 7d, 30d, or ISO date.")
+@click.option("--limit", "-n", default=20, show_default=True, help="Max results to show.")
+@click.option("--cost", is_flag=True, help="Show cost summary.")
+def history_cmd(search: str, model_filter: Optional[str], since: Optional[str], limit: int, cost: bool):
+    """Browse request history."""
+    cfg = load_config()
+    db_path = cfg.db_path
+    init_db(db_path)
+
+    since_iso = _since_to_datetime(since) if since else None
+
+    if cost:
+        summary = db.get_cost_summary(db_path, since=since_iso)
+        console.print(f"[bold]Cost Summary[/bold]")
+        console.print(f"  Total requests : {summary.total_requests}")
+        console.print(f"  Input tokens   : {summary.total_input_tokens:,}")
+        console.print(f"  Output tokens  : {summary.total_output_tokens:,}")
+        console.print(f"  Estimated cost : {format_cost(summary.total_cost)}")
+        if summary.cost_by_model:
+            console.print(f"\n[bold]By Model[/bold]")
+            for model_name, model_cost in summary.cost_by_model.items():
+                model_short = model_name.split("-")[1] if "-" in model_name else model_name
+                console.print(f"  {model_short:<12} {format_cost(model_cost)}")
+        return
+
+    requests = db.search_requests(db_path, query=search, model_filter=model_filter, since=since_iso, limit=limit)
+
+    if not requests:
+        console.print("[dim]No matching requests found.[/dim]")
+        return
+
+    table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+    table.add_column("Age", no_wrap=True)
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Model")
+    table.add_column("Status")
+    table.add_column("Prompt", ratio=1)
+    table.add_column("Tag")
+
+    for r in requests:
+        model_short = r.model.split("-")[1] if "-" in r.model else r.model
+        status_display = f"{_status_icon(r.status)} {r.status}"
+        age = _ago(r.created_at)
+        prompt_preview = r.user_prompt[:60] + "…" if len(r.user_prompt) > 60 else r.user_prompt
+        tag = r.tag or "—"
+        table.add_row(age, r.batch_id, model_short, status_display, prompt_preview, tag)
+
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------

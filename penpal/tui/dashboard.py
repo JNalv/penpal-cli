@@ -56,21 +56,22 @@ def _file_count(file_name: Optional[str]) -> str:
 
 
 def _expires_cell(expires_at: Optional[str]) -> str:
+    """Countdown to when the batch result payload is deleted (typically 29 days after completion)."""
     if not expires_at:
         return "—"
     try:
         dt = datetime.fromisoformat(expires_at).replace(tzinfo=timezone.utc)
         now = datetime.now(tz=timezone.utc)
-        diff = dt - now
-        total = int(diff.total_seconds())
+        total = int((dt - now).total_seconds())
         if total <= 0:
-            return "[dim]expired[/dim]"
+            return "[dim]deleted[/dim]"
         if total < 3600:
-            return f"[yellow]{total // 60}m[/yellow]"
+            return f"[red]{total // 60}m[/red]"
         if total < 86400:
-            return f"{total // 3600}h {(total % 3600) // 60}m"
-        # Show absolute date once > 24h away
-        return dt.strftime("%b %d %H:%M")
+            return f"[yellow]{total // 3600}h {(total % 3600) // 60}m[/yellow]"
+        days = total // 86400
+        hours = (total % 86400) // 3600
+        return f"{days}d {hours}h"
     except Exception:
         return expires_at
 
@@ -91,7 +92,7 @@ _FIXED_COLS = [
     ("tag",      "Tag"),
     ("files",    "Files"),
     ("skill",    "Skill"),
-    ("expires",  "Expires"),
+    ("expires",  "DL expires"),
     ("cost",     "Cost"),
 ]
 # Optional column
@@ -150,7 +151,7 @@ class RequestTable(Widget):
             req.tag or "—",
             _file_count(req.file_name),
             req.skill_name or "—",
-            _expires_cell(req.expires_at),
+            _expires_cell(req.expires_at if req.status == "completed" else None),
             format_cost(req.estimated_cost or 0.0),
         ]
         if self._show_prompt:
