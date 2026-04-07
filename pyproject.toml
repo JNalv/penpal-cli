@@ -8,6 +8,18 @@ version = "0.1.0"
 description = "Async Claude CLI via Batch API — half the cost, none of the rush."
 requires-python = ">=3.11"
 license = "MIT"
+readme = "README.md"
+authors = [{name = "JNalv"}]
+keywords = ["claude", "anthropic", "batch-api", "cli", "llm", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     "anthropic>=0.89.0",
     "click>=8.3.0",
@@ -24,6 +36,11 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/JNalv/penpal-cli"
+Repository = "https://github.com/JNalv/penpal-cli"
+Issues = "https://github.com/JNalv/penpal-cli/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

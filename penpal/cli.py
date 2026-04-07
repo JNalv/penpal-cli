@@ -12,6 +12,8 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
+from pathlib import Path
+
 from penpal import __version__
 from penpal.auth import AuthError, delete_api_key, get_api_key, get_key_status, store_api_key
 from penpal.builder import build_batch_requests, build_single_request, resolve_model
@@ -101,6 +103,69 @@ def _since_to_datetime(since: str) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
+_PENPAL_BLOCK = """\
+<!-- penpal-start -->
+## Penpal (async batch CLI)
+`penpal ask -m <model> "<prompt>"` sends a prompt to the Batch API (50% cheaper, async).
+`penpal status` checks pending requests. `penpal read <id> --raw` retrieves a response.
+Use when the user wants a cheaper/non-urgent query. Do not poll or wait — submit and move on.
+Run `penpal --help` or `penpal <command> --help` for full options including skills,
+file attachments, and batch mode.
+<!-- penpal-end -->"""
+
+
+def _install_penpal_block(filepath: Path, label: str) -> None:
+    """Append penpal instruction block to a markdown file."""
+    import re
+    filepath = Path(filepath).expanduser()
+
+    if filepath.exists():
+        content = filepath.read_text(encoding="utf-8")
+        if "<!-- penpal-start -->" in content:
+            console.print(f"[green]✓[/green] Penpal block already present in {label}.")
+            return
+    else:
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        content = ""
+
+    console.print(f"The following will be added to [cyan]{label}[/cyan]:\n")
+    console.print(_PENPAL_BLOCK)
+    console.print()
+
+    if not click.confirm(f"Add to {label}?", default=False):
+        console.print("Aborted.")
+        return
+
+    separator = "\n\n" if content and not content.endswith("\n\n") else ("\n" if content and not content.endswith("\n") else "")
+    filepath.write_text(content + separator + _PENPAL_BLOCK + "\n", encoding="utf-8")
+    console.print(f"[green]✓[/green] Penpal block added to {label}.")
+
+
+def _uninstall_penpal_block(filepath: Path, label: str) -> None:
+    """Remove penpal instruction block from a markdown file."""
+    import re
+    filepath = Path(filepath).expanduser()
+
+    if not filepath.exists():
+        console.print(f"{label} not found. Nothing to remove.")
+        return
+
+    content = filepath.read_text(encoding="utf-8")
+    if "<!-- penpal-start -->" not in content:
+        console.print(f"No penpal block found in {label}.")
+        return
+
+    cleaned = re.sub(r"\n*<!-- penpal-start -->.*?<!-- penpal-end -->\n?", "", content, flags=re.DOTALL)
+    cleaned = cleaned.strip()
+
+    if not cleaned:
+        filepath.unlink()
+        console.print(f"[green]✓[/green] Penpal block removed. {label} was empty and deleted.")
+    else:
+        filepath.write_text(cleaned + "\n", encoding="utf-8")
+        console.print(f"[green]✓[/green] Penpal block removed from {label}.")
+
+
 @click.group()
 @click.version_option(__version__, prog_name="penpal")
 def main():
@@ -159,7 +224,12 @@ def logout_cmd():
 # penpal ask
 # ---------------------------------------------------------------------------
 
-@main.command("ask")
+@main.command("ask", epilog="""Examples:
+  penpal ask "Explain monads in simple terms"
+  penpal ask -m haiku "Quick question" -t my-tag
+  penpal ask --skill code-review -f main.py "Review this"
+  echo "prompt" | penpal ask --stdin
+  penpal ask -b ./docs/ "Summarize this document" """)
 @click.argument("prompt", required=False)
 @click.option("--model", "-m", default=None, help="Model name or alias (haiku, sonnet, opus).")
 @click.option("--system", "-s", type=click.Path(exists=True), default=None, help="Path to system prompt file.")
@@ -181,7 +251,7 @@ def ask_cmd(
     read_stdin: bool,
     batch_dir: Optional[str],
 ):
-    """Submit a prompt to the Batch API."""
+    """Submit a prompt to Claude via the Batch API (async, 50% cheaper)."""
     from pathlib import Path as _Path
     cfg = load_config()
     db_path = cfg.db_path
@@ -348,13 +418,16 @@ def ask_cmd(
 # penpal status
 # ---------------------------------------------------------------------------
 
-@main.command("status")
-@click.option("--all", "-a", "show_all", is_flag=True, help="Show all requests.")
-@click.option("--limit", "-n", default=10, help="Number of requests to show.")
-@click.option("--watch", "-w", is_flag=True, help="Continuously refresh.")
+@main.command("status", epilog="""Examples:
+  penpal status
+  penpal status --watch
+  penpal status --all --json""")
+@click.option("--all", "-a", "show_all", is_flag=True, help="Show all requests, not just recent.")
+@click.option("--limit", "-n", default=10, help="Number of recent requests to show.")
+@click.option("--watch", "-w", is_flag=True, help="Continuously refresh until Ctrl+C.")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON.")
 def status_cmd(show_all: bool, limit: int, watch: bool, output_json: bool):
-    """Show status of pending and recent requests."""
+    """Check status of pending and recent batch requests."""
     import time as _time
 
     cfg = load_config()
@@ -450,13 +523,18 @@ def status_cmd(show_all: bool, limit: int, watch: bool, output_json: bool):
 # penpal read
 # ---------------------------------------------------------------------------
 
-@main.command("read")
+@main.command("read", epilog="""Examples:
+  penpal read --latest
+  penpal read --latest --raw
+  penpal read msgbatch_abc123
+  penpal read my-tag --full
+  penpal read --latest --extract""")
 @click.argument("batch_id_or_tag", required=False)
 @click.option("--latest", is_flag=True, help="Read the most recently completed response.")
-@click.option("--full", is_flag=True, help="Print complete response without truncation.")
-@click.option("--raw", is_flag=True, help="Print raw text with no Rich formatting.")
-@click.option("--index", "-i", default=None, type=int, help="For multi-request batches: read the Nth result.")
-@click.option("--extract", is_flag=True, help="Extract code blocks from response to disk.")
+@click.option("--full", is_flag=True, help="Print the complete response without line truncation.")
+@click.option("--raw", is_flag=True, help="Print raw text with no Rich formatting (ideal for piping).")
+@click.option("--index", "-i", default=None, type=int, help="For multi-request batches: read the Nth result (0-indexed).")
+@click.option("--extract", is_flag=True, help="Extract fenced code blocks from the response to files on disk.")
 def read_cmd(
     batch_id_or_tag: Optional[str],
     latest: bool,
@@ -465,7 +543,7 @@ def read_cmd(
     index: Optional[int],
     extract: bool,
 ):
-    """Retrieve and display a completed response."""
+    """Retrieve and display a completed batch response."""
     cfg = load_config()
     db_path = cfg.db_path
     init_db(db_path)
@@ -747,7 +825,7 @@ def skills_path():
 @click.option("--limit", "-n", default=20, show_default=True, help="Max results to show.")
 @click.option("--cost", is_flag=True, help="Show cost summary.")
 def history_cmd(search: str, model_filter: Optional[str], since: Optional[str], limit: int, cost: bool):
-    """Browse request history."""
+    """Browse and search past requests with cost tracking."""
     cfg = load_config()
     db_path = cfg.db_path
     init_db(db_path)
@@ -799,7 +877,39 @@ def history_cmd(search: str, model_filter: Optional[str], since: Optional[str], 
 
 @main.command("session")
 def session_cmd():
-    """Launch the TUI dashboard."""
+    """Launch the interactive TUI dashboard."""
     from penpal.tui.app import PenpalApp
     app = PenpalApp()
     app.run()
+
+
+# ---------------------------------------------------------------------------
+# penpal setup-claude-code / uninstall-claude-code
+# ---------------------------------------------------------------------------
+
+@main.command("setup-claude-code")
+def setup_claude_code_cmd():
+    """Add penpal instructions to ~/.claude/CLAUDE.md for Claude Code."""
+    _install_penpal_block(Path("~/.claude/CLAUDE.md"), "~/.claude/CLAUDE.md")
+
+
+@main.command("uninstall-claude-code")
+def uninstall_claude_code_cmd():
+    """Remove penpal instructions from ~/.claude/CLAUDE.md."""
+    _uninstall_penpal_block(Path("~/.claude/CLAUDE.md"), "~/.claude/CLAUDE.md")
+
+
+# ---------------------------------------------------------------------------
+# penpal setup-agents-md / uninstall-agents-md
+# ---------------------------------------------------------------------------
+
+@main.command("setup-agents-md")
+def setup_agents_md_cmd():
+    """Add penpal instructions to ./AGENTS.md (cross-agent standard)."""
+    _install_penpal_block(Path("AGENTS.md"), "AGENTS.md")
+
+
+@main.command("uninstall-agents-md")
+def uninstall_agents_md_cmd():
+    """Remove penpal instructions from ./AGENTS.md."""
+    _uninstall_penpal_block(Path("AGENTS.md"), "AGENTS.md")
