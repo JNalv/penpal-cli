@@ -42,6 +42,12 @@ Homepage = "https://github.com/JNalv/penpal-cli"
 Repository = "https://github.com/JNalv/penpal-cli"
 Issues = "https://github.com/JNalv/penpal-cli/issues"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["penpal*"]
+
+[tool.setuptools.package-data]
+penpal = ["tui/*.tcss"]
