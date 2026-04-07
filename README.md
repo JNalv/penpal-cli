@@ -25,7 +25,7 @@ Requires Python 3.11+.
 | **Bulk analysis** | 50% cheaper, ideal for processing 100s of files | Summarize 500 research papers, review 50 PRs |
 | **AI coding agents** | CLI integrates with Claude Code, Cursor, VS Code, et al. | Let your IDE run expensive queries in the background |
 | **Evaluations** | Process thousands of test cases at batch pricing | Run LLM evaluation suites on a budget |
-| **Scheduled workflows** | Fire off a prompt and check results tomorrow | Generate daily reports, batch content creation |
+| **Scheduled workflows** | Fire off a prompt and check results tomorrow | Generate daily reports, batch content creation, batch moderation |
 | **Spend smarter!** | Deploy your money & tokens more strategically | Get big docs and big answers a little later, for half the price |
 
 ## Quick start
@@ -74,7 +74,7 @@ Since Penpal is CLI-powered, your favorite coding assistant can cheaply send exp
 - 🎯 **Batch processing in automation**: Submit 500 summaries at once, retrieve them as needed without bloating your context window.
 - ⚡ **Scheduled workflows**: Run expensive evaluations or code reviews overnight at batch pricing.
 
-No streaming delays, no token-counting anxiety—just submit and move on.
+No streaming delays, no token-counting anxiety — just submit and move on.
 
 ### Claude Code
 
@@ -98,7 +98,7 @@ This writes to `./AGENTS.md` in the current directory. Remove it with `penpal un
 
 ### Batch mode
 
-Process an entire directory of files in a single batch:
+A batch can contain multiple requests. Process an entire directory of files in a single batch:
 
 ```bash
 penpal ask -b ./documents/ "Summarize this document"
@@ -115,6 +115,7 @@ penpal skills add code-review    # Opens $EDITOR
 penpal ask --skill code-review -f app.py "Review this"
 penpal skills                    # List all skills
 ```
+You can also add skills manually to `~/.config/penpal/skills`.
 
 ### File attachments
 
@@ -171,7 +172,7 @@ Use short names instead of full model identifiers:
 | `opus`   | `claude-opus-4-20250514`       |
 
 ```bash
-penpal ask -m haiku "Quick question"
+penpal ask -m haiku "What was Pangaea?"
 ```
 
 ## Configuration
