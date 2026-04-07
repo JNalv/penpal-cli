@@ -189,7 +189,7 @@ Example `config.toml`:
 
 ```toml
 model = "sonnet"
-max_tokens = 4096
+max_tokens = 8192
 poll_interval = 180
 preview_lines = 40
 ```
