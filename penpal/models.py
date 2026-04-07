@@ -1,7 +1,7 @@
 """Data classes for Penpal domain objects."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -57,3 +57,5 @@ class CostSummary:
     total: float
     by_model: dict[str, float]
     request_count: int
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0

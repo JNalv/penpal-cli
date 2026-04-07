@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -74,8 +74,14 @@ def load_config() -> PenpalConfig:
     raw: dict = {}
     cf = config_file()
     if cf.exists():
-        with open(cf, "rb") as f:
-            raw = tomllib.load(f)
+        try:
+            with open(cf, "rb") as f:
+                raw = tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            import sys
+            print(f"Error: config.toml is invalid: {e}", file=sys.stderr)
+            print(f"  Fix or delete: {cf}", file=sys.stderr)
+            sys.exit(1)
 
     defaults = raw.get("defaults", {})
     display = raw.get("display", {})

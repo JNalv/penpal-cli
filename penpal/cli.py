@@ -92,6 +92,7 @@ def _status_icon(status: str) -> str:
 
 
 def _since_to_datetime(since: str) -> Optional[str]:
+    """Return SQLite-compatible datetime string (no tz suffix) for the given --since value."""
     now = datetime.now(tz=timezone.utc)
     mapping = {
         "today": now.replace(hour=0, minute=0, second=0, microsecond=0),
@@ -100,7 +101,20 @@ def _since_to_datetime(since: str) -> Optional[str]:
         "30d": now - timedelta(days=30),
     }
     dt = mapping.get(since)
-    return dt.isoformat() if dt else None
+    if dt:
+        # SQLite stores datetime('now') as "YYYY-MM-DD HH:MM:SS" (UTC, no tz suffix).
+        # Using isoformat() produces "YYYY-MM-DDTHH:MM:SS+00:00" which sorts incorrectly
+        # because space(32) < T(84) in ASCII, causing all stored dates to appear "before" the threshold.
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    # Try parsing as ISO date (e.g. "2025-01-15")
+    try:
+        parsed = datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        raise click.BadParameter(
+            f"'{since}' is not a valid date. Use: today, yesterday, 7d, 30d, or an ISO date (YYYY-MM-DD).",
+            param_hint="'--since'",
+        )
 
 
 _PENPAL_BLOCK = """\
@@ -116,7 +130,6 @@ file attachments, and batch mode.
 
 def _install_penpal_block(filepath: Path, label: str) -> None:
     """Append penpal instruction block to a markdown file."""
-    import re
     filepath = Path(filepath).expanduser()
 
     if filepath.exists():
@@ -252,7 +265,6 @@ def ask_cmd(
     batch_dir: Optional[str],
 ):
     """Submit a prompt to Claude via the Batch API (async, 50% cheaper)."""
-    from pathlib import Path as _Path
     cfg = load_config()
     db_path = cfg.db_path
     init_db(db_path)
@@ -291,20 +303,13 @@ def ask_cmd(
     mt = max_tokens or cfg.max_tokens
 
     # Resolve files
-    file_paths = [_Path(f) for f in files]
-
-    # Get API key
-    try:
-        api_key = get_api_key()
-    except AuthError as e:
-        err_console.print(f"[red]✗[/red] {e}")
-        sys.exit(1)
+    file_paths = [Path(f) for f in files]
 
     # --batch mode: one request per file in directory
     if batch_dir:
         from penpal.builder import IMAGE_EXTENSIONS, PDF_EXTENSIONS, TEXT_EXTENSIONS
         supported_exts = IMAGE_EXTENSIONS | PDF_EXTENSIONS | TEXT_EXTENSIONS
-        batch_path = _Path(batch_dir)
+        batch_path = Path(batch_dir)
         batch_files = sorted(
             p for p in batch_path.iterdir()
             if p.is_file() and p.suffix.lower() in supported_exts
@@ -322,6 +327,13 @@ def ask_cmd(
                 system_prompt=system_text,
             )
         except ValueError as e:
+            err_console.print(f"[red]✗[/red] {e}")
+            sys.exit(1)
+
+        # Get API key (after validation so file errors surface first)
+        try:
+            api_key = get_api_key()
+        except AuthError as e:
             err_console.print(f"[red]✗[/red] {e}")
             sys.exit(1)
 
@@ -362,7 +374,7 @@ def ask_cmd(
             console.print(f"  Skill: {skill_name}")
         return
 
-    # Single request
+    # Single request — build payload first so file errors surface before auth check
     try:
         request_obj = build_single_request(
             prompt=prompt,
@@ -372,6 +384,13 @@ def ask_cmd(
             files=file_paths if file_paths else None,
         )
     except ValueError as e:
+        err_console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+    # Get API key (after build so file/type errors surface first)
+    try:
+        api_key = get_api_key()
+    except AuthError as e:
         err_console.print(f"[red]✗[/red] {e}")
         sys.exit(1)
 
@@ -588,7 +607,7 @@ def read_cmd(
     if req.status == "processing":
         console.print(f"[yellow]⏳[/yellow] Batch {req.batch_id} is still processing.")
         console.print(f"  Submitted {_ago(req.created_at)}. Check back soon.")
-        return
+        sys.exit(2)
 
     if req.status in ("failed", "expired"):
         err_console.print(f"[red]✗[/red] Batch {req.batch_id} {req.status}.")
@@ -668,10 +687,7 @@ def read_cmd(
 
     # Extraction
     if extract:
-        from pathlib import Path as _Path2
-        out_dir = cfg.extraction_output_dir if hasattr(cfg, "extraction_output_dir") else _Path2(".")
-        min_lines = cfg.extraction_min_lines if hasattr(cfg, "extraction_min_lines") else 20
-        content, written = extract_code_blocks(content, out_dir, min_lines)
+        content, written = extract_code_blocks(content, cfg.extraction_output_dir, cfg.extraction_min_lines)
         if written:
             for p in written:
                 err_console.print(f"[green]✓[/green] Extracted: {p}")
@@ -713,7 +729,7 @@ def config_cmd(path: bool, edit: bool):
         subprocess.call([editor, str(cfg.config_file)])
         return
     console.print(f"[bold]Penpal Configuration[/bold]")
-    console.print(f"  model          = {cfg.model}")
+    console.print(f"  model          = {resolve_model(cfg.model)}")
     console.print(f"  max_tokens     = {cfg.max_tokens}")
     console.print(f"  poll_interval  = {cfg.poll_interval}s")
     console.print(f"  preview_lines  = {cfg.preview_lines}")
@@ -760,7 +776,7 @@ def skills_show(name: str):
 @click.argument("name")
 def skills_add(name: str):
     """Create a new skill (opens $EDITOR)."""
-    import os, subprocess, tempfile
+    import os, subprocess
     cfg = load_config()
     if skills_mod.skill_exists(cfg.skills_dir, name):
         err_console.print(f"[red]✗[/red] Skill '{name}' already exists. Use [cyan]penpal skills edit {name}[/cyan].")
@@ -830,18 +846,18 @@ def history_cmd(search: str, model_filter: Optional[str], since: Optional[str], 
     db_path = cfg.db_path
     init_db(db_path)
 
-    since_iso = _since_to_datetime(since) if since else None
+    since_iso = _since_to_datetime(since) if since else None  # raises BadParameter on invalid input
 
     if cost:
         summary = db.get_cost_summary(db_path, since=since_iso)
         console.print(f"[bold]Cost Summary[/bold]")
-        console.print(f"  Total requests : {summary.total_requests}")
+        console.print(f"  Total requests : {summary.request_count}")
         console.print(f"  Input tokens   : {summary.total_input_tokens:,}")
         console.print(f"  Output tokens  : {summary.total_output_tokens:,}")
-        console.print(f"  Estimated cost : {format_cost(summary.total_cost)}")
-        if summary.cost_by_model:
+        console.print(f"  Estimated cost : {format_cost(summary.total)}")
+        if summary.by_model:
             console.print(f"\n[bold]By Model[/bold]")
-            for model_name, model_cost in summary.cost_by_model.items():
+            for model_name, model_cost in summary.by_model.items():
                 model_short = model_name.split("-")[1] if "-" in model_name else model_name
                 console.print(f"  {model_short:<12} {format_cost(model_cost)}")
         return

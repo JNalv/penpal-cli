@@ -69,10 +69,6 @@ def get_conn(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
 def init_db(db_path: Path) -> None:
     with get_conn(db_path) as conn:
         conn.executescript(SCHEMA)
-        # Migration: add expires_at if not present (existing databases)
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(requests)").fetchall()}
-        if "expires_at" not in cols:
-            conn.execute("ALTER TABLE requests ADD COLUMN expires_at TEXT")
 
 
 def _row_to_request(row: sqlite3.Row) -> Request:
@@ -181,11 +177,20 @@ def save_response(
 
 def get_request_by_batch_id(db_path: Path, batch_id: str) -> Optional[Request]:
     with get_conn(db_path) as conn:
+        # Exact match first
         row = conn.execute(
-            "SELECT * FROM requests WHERE batch_id=? OR batch_id LIKE ?",
-            (batch_id, batch_id + "%"),
+            "SELECT * FROM requests WHERE batch_id=?", (batch_id,)
         ).fetchone()
-        return _row_to_request(row) if row else None
+        if row:
+            return _row_to_request(row)
+        # Prefix match — return the most recently created if unambiguous
+        rows = conn.execute(
+            "SELECT * FROM requests WHERE batch_id LIKE ? ORDER BY created_at DESC",
+            (batch_id + "%",),
+        ).fetchall()
+        if not rows:
+            return None
+        return _row_to_request(rows[0])
 
 
 def get_request_by_tag(db_path: Path, tag: str) -> Optional[Request]:
@@ -289,7 +294,7 @@ def search_requests(
 
 
 def get_cost_summary(db_path: Path, since: Optional[str] = None) -> CostSummary:
-    sql_base = "SELECT model, estimated_cost FROM requests WHERE estimated_cost IS NOT NULL"
+    sql_base = "SELECT model, estimated_cost, input_tokens, output_tokens FROM requests WHERE 1=1"
     params: list = []
     if since:
         sql_base += " AND created_at >= ?"
@@ -306,14 +311,24 @@ def get_cost_summary(db_path: Path, since: Optional[str] = None) -> CostSummary:
         count = conn.execute(count_sql, count_params).fetchone()[0]
 
     total = 0.0
+    total_input = 0
+    total_output = 0
     by_model: dict[str, float] = {}
     for row in rows:
         cost = row["estimated_cost"] or 0.0
         total += cost
         model = row["model"]
         by_model[model] = by_model.get(model, 0.0) + cost
+        total_input += row["input_tokens"] or 0
+        total_output += row["output_tokens"] or 0
 
-    return CostSummary(total=total, by_model=by_model, request_count=count)
+    return CostSummary(
+        total=total,
+        by_model=by_model,
+        request_count=count,
+        total_input_tokens=total_input,
+        total_output_tokens=total_output,
+    )
 
 
 def get_latest_completed(db_path: Path) -> Optional[Request]:
