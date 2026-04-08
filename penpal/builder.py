@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import re
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -108,14 +109,23 @@ def build_batch_requests(
 ) -> list[dict]:
     """Build one batch request per file, applying template_prompt to each."""
     requests = []
+    used: set[str] = set()
     for fp in files:
+        base = re.sub(r"[^a-zA-Z0-9_-]", "_", fp.stem)[:64]
+        sanitized = base
+        n = 1
+        while sanitized in used:
+            suffix = f"_{n}"
+            sanitized = base[: 64 - len(suffix)] + suffix
+            n += 1
+        used.add(sanitized)
         requests.append(
             build_single_request(
                 prompt=template_prompt,
                 model=model,
                 max_tokens=max_tokens,
                 system_prompt=system_prompt,
-                custom_id=fp.name,
+                custom_id=sanitized,
                 files=[fp],
             )
         )
